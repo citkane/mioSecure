@@ -1,64 +1,78 @@
-const Session = require('./etc/Session');
-const MioSecurityUtils = require('./etc/MioSecurityUtils');
-const {
-    promptSchemas,
-    prompt,
-    setPrompt
-} = require('./etc/promptSchemas');
-const colors = require("colors/safe");
+const mqtt = require('mqtt');
+const MioLang = require('@mio-core/miolang');
+const MioUtils = require('./etc/MioUtils');
 
-let MioLang, appDetails, logger, config;
-module.exports = class MioUtils extends MioSecurity {
-    constructor(_MioLang, _appDetails, _logger) {
-        super(_appDetails, _logger)
+let appDetails, logger, config;
+module.exports = class MioService extends MioUtils {
+    constructor(_appDetails, _logger, _MioLang = MioLang){
+        super(_MioLang, _appDetails, _logger);
         appDetails = _appDetails;
-        MioLang = _MioLang;
         logger = _logger;
         config = appDetails.config.get(appDetails.domain);
-        setPrompt(appDetails.uid);
+        this.thisModuleName = appDetails.thisModuleName;
+        this.thisLocation = appDetails.thisLocation;
+        this.thisServiceType = appDetails.thisServiceType
+
     }
-
-    prompt(_schema, message, resolve, reject) {
-        function doPrompt(self){
-            const schema = promptSchemas[_schema];
-            if(!schema) return reject(Error(`PromptSchema "${_schema}" was not found`));
-            if(schema.color && colors[schema.color]) {
-                if(message) message = colors[schema.color](message);
-                schema.message = colors[schema.color](schema.message);
-            }
-
-            logger.prompt(message || schema.message, schema.title, schema.color);
-            prompt.start();
-            prompt.get(schema, (err, result) => {
-                if(err) return reject(err);
-                if(schema.validate) {
-                    const v = schema.validate(result);
-                    if(v.invalid) return self.prompt(_schema, v.invalid, resolve, reject);
-                }
-                resolve(result);
-            })
-        }
-        if(resolve && reject){
-            doPrompt(this);
-        } else {
-            return new Promise((_resolve, _reject) => {
-                resolve = _resolve;
-                reject = _reject;
-                doPrompt(this);
-            })
-        }
-    }
-
-    makeSession(keyManager){
-        return new Session(this, appDetails, logger).init(keyManager)
+    init(keyManager){
+        return this.makeSession(keyManager)
             .then(session => {
-                logger.logMadesession();
-                return session;
+                this.internalApi = session.internalApi.api;
+                this.externalApi = session.externalApi;
+                if(keyManager) {
+                    keyManager.mio = this;
+                }
+                return this;
+            })
+    }
+    connectMqtt(data){
+        const { user, token } = data;
+        logger.log('Connecting MQTT client to broker.')
+        switch(appDetails.type) {
+            case 'service':
+                return this.connectMqttService(user, token);
+            case 'device-iotas':
+                return Promise.reject('not implemented');
+            case 'device-sonoff':
+                return Promise.reject('not implemented');
+            default:
+                return Promise.reject('not implemented');
+        }
+    }
+    connectMqttService(user, token){
+        return this.makeClient(
+            config.get('mqttBroker.tcp'),
+            user.credentials.username,
+            appDetails.uid,
+            token
+        );
+    }
+    
+    makeClient(location, username, clientId, token) {
+        return new Promise((resolve, reject) => {
+            const client = mqtt.connect(location, {
+                username,
+                clientId,
+                password: token,
+                protocolVersion: 5
             });
+            client.on('connect', () => {
+                logger.log('mqtt connected');
+                resolve(client);
+            })
+            client.on('error', err => {
+                logger.log(err.message);
+            })
+            this.mio.init(client);
+        })               
     }
 
-    makeMioLang(session) {
-        this.mio = new MioLang(session, logger, appDetails.uid).mio;
-        return this.mio;
+    publishPermissions() {
+        return new Promise((resolve, reject) => {
+            this.mio.create('miocore-auth.permissions.addPermissions', [this.externalApi]).then(() => {
+                console.log('hello');
+                resolve();
+            })           
+        })
     }
 }
